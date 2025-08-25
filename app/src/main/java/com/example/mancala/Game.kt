@@ -1,135 +1,93 @@
 package com.example.mancala
 
-enum class Player { A, B }
+// Pick 5–6 emojis; you can change these and it still works.
+val stoneSymbols = listOf("\uD83D\uDC27", "💎", "\uD83D\uDC0B", "🦑", "\uD83E\uDD95", "\uD83D\uDC20")
 
-data class GameState(
-    val pits: IntArray,
-    val currentPlayer: Player,
-    val isGameOver: Boolean = false,
-    val extraTurn: Boolean = false,
-) {
-    companion object {
-        fun initial(stonesPerPit: Int = 4): GameState {
-            val pits = IntArray(14)
-            for (i in 0..5) pits[i] = stonesPerPit    // A pits
-            for (i in 7..12) pits[i] = stonesPerPit   // B pits
-            return GameState(pits = pits, currentPlayer = Player.A)
-        }
-    }
-}
+data class Stone(val symbol: String = stoneSymbols.random())
+
+enum class Player { A, B; fun opponent() = if (this == A) B else A }
 
 /**
- * Apply post-sowing rules (capture, endgame) after we visually dropped stones.
- * Accepts the pits state after sowing and the index of the last drop.
+ * Pits 0..5  -> Player A side
+ * Pit  6     -> Player A store
+ * Pits 7..12 -> Player B side
+ * Pit  13    -> Player B store
  */
-fun GameState.afterAnimatedSowing(animatedPits: IntArray, lastIndex: Int): GameState {
-    if (isGameOver) return this
-    val pits = animatedPits.copyOf()
+data class GameState(
+    val pits: List<MutableList<Stone>>,
+    val currentPlayer: Player,
+    val extraTurn: Boolean = false
+) {
+    // Game over when one side is empty
+    val isGameOver: Boolean
+        get() = (0..5).all { pits[it].isEmpty() } || (7..12).all { pits[it].isEmpty() }
 
-    val myStore = if (currentPlayer == Player.A) 6 else 13
-    val oppStore = if (currentPlayer == Player.A) 13 else 6
+    // Safe copy helper (avoid name 'copy' to not confuse with data class copy)
+    fun copyWith(
+        pits: List<MutableList<Stone>> = this.pits.map { it.toMutableList() },
+        currentPlayer: Player = this.currentPlayer,
+        extraTurn: Boolean = this.extraTurn
+    ): GameState = GameState(pits, currentPlayer, extraTurn)
 
-    // Determine next player based on last index landing in my store
-    var nextPlayer = if (lastIndex == myStore) currentPlayer else currentPlayer.opponent()
-    var gotExtra = lastIndex == myStore
+    /**
+     * Apply rules AFTER sowing has visually happened:
+     * - extra turn if last stone landed in your store
+     * - capture if last stone lands in an empty pit on your side
+     * - end game sweep when a side is empty
+     */
+    fun afterAnimatedSowing(newPits: List<MutableList<Stone>>, lastIndex: Int): GameState {
+        val pits = newPits.map { it.toMutableList() }.toMutableList()
 
-    // Capture rule: if last stone lands in an empty pit on player's side, capture opposite
-    val isMySide = if (currentPlayer == Player.A) lastIndex in 0..5 else lastIndex in 7..12
-    if (!gotExtra && isMySide && pits[lastIndex] == 1) {
-        val opposite = 12 - lastIndex
-        val captured = pits[opposite]
-        if (captured > 0) {
-            pits[myStore] += captured + 1
-            pits[lastIndex] = 0
-            pits[opposite] = 0
+        val myStore = if (currentPlayer == Player.A) 6 else 13
+        val extra = lastIndex == myStore
+
+        // Capture (only if not extra turn)
+        if (!extra) {
+            val mySide = if (currentPlayer == Player.A) (0..5) else (7..12)
+            if (lastIndex in mySide && pits[lastIndex].size == 1) {
+                val opposite = 12 - lastIndex
+                if (pits[opposite].isNotEmpty()) {
+                    // Android-safe: do not call List.removeLast() (Java 21 default).
+                    val lastStone = pits[lastIndex].removeAt(pits[lastIndex].lastIndex)
+                    val captured = pits[opposite].toList()
+                    pits[opposite].clear()
+                    pits[myStore].add(lastStone)
+                    pits[myStore].addAll(captured)
+                }
+            }
+        }
+
+        // End game sweep if one side is empty
+        val aEmpty = (0..5).all { pits[it].isEmpty() }
+        val bEmpty = (7..12).all { pits[it].isEmpty() }
+        if (aEmpty || bEmpty) {
+            for (i in 0..5) { pits[6].addAll(pits[i]); pits[i].clear() }
+            for (i in 7..12) { pits[13].addAll(pits[i]); pits[i].clear() }
+            return GameState(pits, currentPlayer, extraTurn = false)
+        }
+
+        val next = if (extra) currentPlayer else currentPlayer.opponent()
+        return GameState(pits, next, extraTurn = extra)
+    }
+
+    fun endMessage(): String {
+        val a = pits[6].size
+        val b = pits[13].size
+        return when {
+            a > b -> "Game over. Player A wins $a–$b!"
+            b > a -> "Game over. Player B wins $b–$a!"
+            else -> "Game over. It's a draw $a–$b!"
         }
     }
 
-    // End game check
-    val aEmpty = (0..5).all { pits[it] == 0 }
-    val bEmpty = (7..12).all { pits[it] == 0 }
-    var gameOver = false
-    if (aEmpty || bEmpty) {
-        pits[6] += (0..5).sumOf { pits[it] }
-        pits[13] += (7..12).sumOf { pits[it] }
-        for (i in 0..5) pits[i] = 0
-        for (i in 7..12) pits[i] = 0
-        gameOver = true
-        nextPlayer = currentPlayer
-        gotExtra = false
-    }
+    fun withHintMove(): GameState = this
 
-    return copy(pits = pits, currentPlayer = nextPlayer, isGameOver = gameOver, extraTurn = gotExtra)
-}
-
-fun GameState.makeMove(startPit: Int): GameState {
-    if (isGameOver) return this
-    val pits = this.pits.copyOf()
-    var stones = pits[startPit]
-    pits[startPit] = 0
-
-    val myStore = if (currentPlayer == Player.A) 6 else 13
-    val oppStore = if (currentPlayer == Player.A) 13 else 6
-
-    var index = startPit
-    while (stones > 0) {
-        index = (index + 1) % 14
-        if (index == oppStore) continue
-        pits[index]++
-        stones--
-    }
-
-    var nextPlayer = if (index == myStore) currentPlayer else currentPlayer.opponent()
-    var gotExtra = index == myStore
-
-    val isMySide = if (currentPlayer == Player.A) index in 0..5 else index in 7..12
-    if (isMySide && pits[index] == 1) {
-        val opposite = 12 - index
-        val captured = pits[opposite]
-        if (captured > 0) {
-            pits[myStore] += captured + 1
-            pits[index] = 0
-            pits[opposite] = 0
+    companion object {
+        fun initial(stonesPerPit: Int = 4): GameState {
+            val pits = List(14) { mutableListOf<Stone>() }
+            for (i in 0..5) repeat(stonesPerPit) { pits[i].add(Stone()) }
+            for (i in 7..12) repeat(stonesPerPit) { pits[i].add(Stone()) }
+            return GameState(pits, Player.A)
         }
     }
-
-    val aEmpty = (0..5).all { pits[it] == 0 }
-    val bEmpty = (7..12).all { pits[it] == 0 }
-    var gameOver = false
-    if (aEmpty || bEmpty) {
-        pits[6] += (0..5).sumOf { pits[it] }
-        pits[13] += (7..12).sumOf { pits[it] }
-        for (i in 0..5) pits[i] = 0
-        for (i in 7..12) pits[i] = 0
-        gameOver = true
-        nextPlayer = currentPlayer
-        gotExtra = false
-    }
-
-    return copy(pits = pits, currentPlayer = nextPlayer, isGameOver = gameOver, extraTurn = gotExtra)
 }
-
-fun GameState.withHintMove(): GameState {
-    if (isGameOver) return this
-    val range = if (currentPlayer == Player.A) 0..5 else 7..12
-    val best = range.filter { pits[it] > 0 }.maxByOrNull { simulateScoreGain(it) }
-    return if (best != null) makeMove(best) else this
-}
-
-private fun GameState.simulateScoreGain(move: Int): Int {
-    val after = this.makeMove(move)
-    val myStore = if (currentPlayer == Player.A) 6 else 13
-    return after.pits[myStore] - this.pits[myStore]
-}
-
-fun GameState.endMessage(): String {
-    val a = pits[6]
-    val b = pits[13]
-    return when {
-        a > b -> "Game over. Player A wins $a–$b!"
-        b > a -> "Game over. Player B wins $b–$a!"
-        else -> "Game over. It's a draw $a–$b!"
-    }
-}
-
-private fun Player.opponent(): Player = if (this == Player.A) Player.B else Player.A
